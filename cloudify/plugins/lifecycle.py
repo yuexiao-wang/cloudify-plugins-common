@@ -28,9 +28,13 @@ def install_node_instances(graph, node_instances, related_nodes=None):
     processor.install()
 
 
-def uninstall_node_instances(graph, node_instances, related_nodes=None):
+def uninstall_node_instances(graph,
+                             node_instances,
+                             ignore_failure,
+                             related_nodes=None):
     processor = LifecycleProcessor(graph=graph,
                                    node_instances=node_instances,
+                                   ignore_failure=ignore_failure,
                                    related_nodes=related_nodes)
     processor.uninstall()
 
@@ -71,11 +75,13 @@ class LifecycleProcessor(object):
                  graph,
                  node_instances=None,
                  related_nodes=None,
-                 modified_relationship_ids=None):
+                 modified_relationship_ids=None,
+                 ignore_failure=False):
         self.graph = graph
         self.node_instances = node_instances or set()
         self.intact_nodes = related_nodes or set()
         self.modified_relationship_ids = modified_relationship_ids or {}
+        self.ignore_failure = ignore_failure
 
     def install(self):
         self._process_node_instances(
@@ -93,7 +99,8 @@ class LifecycleProcessor(object):
         subgraphs = {}
         for instance in self.node_instances:
             subgraphs[instance.id] = \
-                node_instance_subgraph_func(instance, self.graph)
+                node_instance_subgraph_func(
+                    instance, self.graph, self.ignore_failure)
 
         for instance in self.intact_nodes:
             subgraphs[instance.id] = self.graph.subgraph(
@@ -169,7 +176,7 @@ def set_send_node_event_on_error_handler(task, instance):
     task.on_failure = send_node_event_error_handler
 
 
-def install_node_instance_subgraph(instance, graph):
+def install_node_instance_subgraph(instance, graph, ignore_failure):
     """This function is used to create a tasks sequence installing one node
     instance.
     Considering the order of tasks executions, it enforces the proper
@@ -218,11 +225,11 @@ def install_node_instance_subgraph(instance, graph):
         ),
         instance.set_state('started'))
 
-    subgraph.on_failure = get_install_subgraph_on_failure_handler(instance)
+    subgraph.on_failure = get_subgraph_on_failure_handler(instance)
     return subgraph
 
 
-def uninstall_node_instance_subgraph(instance, graph):
+def uninstall_node_instance_subgraph(instance, graph, ignore_failure=False):
     subgraph = graph.subgraph(instance.id)
     sequence = subgraph.sequence()
     sequence.add(
@@ -247,50 +254,55 @@ def uninstall_node_instance_subgraph(instance, graph):
         instance.set_state('deleted')
     )
 
-    def set_ignore_handlers(_subgraph):
+    def set_failure_handlers(_subgraph):
         for task in _subgraph.tasks.itervalues():
             if task.is_subgraph:
-                set_ignore_handlers(task)
+                set_failure_handlers(task)
             else:
                 set_send_node_event_on_error_handler(task, instance)
-    set_ignore_handlers(subgraph)
+
+    if ignore_failure:
+        set_failure_handlers(subgraph)
+    else:
+        subgraph.on_failure = get_subgraph_on_failure_handler(
+            instance, uninstall_node_instance_subgraph)
 
     return subgraph
 
 
 def reinstall_node_instance_subgraph(instance, graph):
     reinstall_subgraph = graph.subgraph('reinstall_{0}'.format(instance.id))
-    uninstall_subgraph = uninstall_node_instance_subgraph(instance,
-                                                          reinstall_subgraph)
-    install_subgraph = install_node_instance_subgraph(instance,
-                                                      reinstall_subgraph)
+    uninstall_subgraph = uninstall_node_instance_subgraph(
+        instance, reinstall_subgraph, False)
+    install_subgraph = install_node_instance_subgraph(
+        instance, reinstall_subgraph, False)
     reinstall_sequence = reinstall_subgraph.sequence()
     reinstall_sequence.add(
         instance.send_event('Node lifecycle failed. '
                             'Attempting to re-run node lifecycle'),
         uninstall_subgraph,
         install_subgraph)
-    reinstall_subgraph.on_failure = get_install_subgraph_on_failure_handler(
+    reinstall_subgraph.on_failure = get_subgraph_on_failure_handler(
         instance)
     return reinstall_subgraph
 
 
-def get_install_subgraph_on_failure_handler(instance):
-    def install_subgraph_on_failure_handler(subgraph):
+def get_subgraph_on_failure_handler(
+        instance, retried_task=reinstall_node_instance_subgraph):
+    def subgraph_on_failure_handler(subgraph):
         graph = subgraph.graph
         for task in subgraph.tasks.itervalues():
             subgraph.remove_task(task)
         if not subgraph.containing_subgraph:
             result = workflow_tasks.HandlerResult.retry()
-            result.retried_task = reinstall_node_instance_subgraph(
-                instance, graph)
+            result.retried_task = retried_task(instance, graph)
             result.retried_task.current_retries = subgraph.current_retries + 1
         else:
             result = workflow_tasks.HandlerResult.ignore()
             subgraph.containing_subgraph.failed_task = subgraph.failed_task
             subgraph.containing_subgraph.set_state(workflow_tasks.TASK_FAILED)
         return result
-    return install_subgraph_on_failure_handler
+    return subgraph_on_failure_handler
 
 
 def _relationships_operations(graph,

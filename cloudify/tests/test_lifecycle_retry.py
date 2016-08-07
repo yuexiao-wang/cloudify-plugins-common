@@ -72,8 +72,13 @@ class TaskLifecycleRetryTests(testtools.TestCase):
         global invocations
         invocations = []
 
-    def _run(self, env, subgraph_retries=0, workflow='install'):
+    def _run(self,
+             env,
+             subgraph_retries=0,
+             workflow='install',
+             parameters=None):
         env.execute(workflow,
+                    parameters=parameters,
                     task_retries=1,
                     task_retry_interval=0,
                     subgraph_retries=subgraph_retries)
@@ -193,8 +198,11 @@ class TaskLifecycleRetryTests(testtools.TestCase):
 
     @workflow_test(blueprint_path, inputs=inputs('node2', 'stop', 6))
     def test_retry_lifecycle_in_uninstall_2(self, env):
-        e = self.assertRaises(RuntimeError, self._run, env,
-                              subgraph_retries=1, workflow='uninstall')
+        parameters = {
+            'ignore_failure': True
+        }
+        e = self.assertRaises(RuntimeError, self._run, env, subgraph_retries=1,
+                              workflow='uninstall', parameters=parameters)
         self.assertIn('test_lifecycle_retry.operation', str(e))
         self.assertEqual(invocations, [
             ('node2', 'stop'),

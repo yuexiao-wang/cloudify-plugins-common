@@ -485,6 +485,10 @@ class TestRelationshipOrderInLifecycleWorkflows(testtools.TestCase):
             parameters = {
                 'node_instance_id': self._get_node_instance('main').id
             }
+        elif workflow == 'uninstall':
+            parameters = {
+                'ignore_failure': True
+            }
         self.env.execute(workflow, parameters=parameters)
         main_instance = self._get_node_instance('main')
         depends_on_main = self._get_node_instance('depends')
